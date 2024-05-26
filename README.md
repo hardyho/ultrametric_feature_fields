@@ -23,21 +23,24 @@ pip install models/csrc/
 
 ## Data
 
-Download the Blender-HS dataset from the [link](TODO). Organized the dataset in following structure:
+Download the Blender-HS dataset from the [link](https://drive.google.com/file/d/1b7PPaZ8QTGF_lsv8rqvSKm3-IWMbK-c9/view?usp=sharing). Organized the dataset in following structure:
 ```
 -
   - train
+    - IMAGE_i.png
+        ...
   - val
   - train_seg
-    - IMAGE_i.png
-    ...
-  - val_seg
-  - train_seg_hierarchy
     - IMAGE_i
       - MASK_i.png
       ...
+  - val_seg
+  - train_seg_hierarchy
     ...
   - val_seg_hierarchy
+  - gt_seg
+    - train
+    - val
   - transforms_train.json
   - transforms_val.json
 ```
@@ -48,7 +51,7 @@ The scripts for generating similar SAM outputs on new custom datasets is coming 
 
 ### NeRF Training
 ```
-python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 1 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train
+python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train
 ```
 
 - `--root_dir` is the root directory of the dataset.
