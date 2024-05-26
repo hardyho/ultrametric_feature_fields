@@ -2,6 +2,10 @@
 
 This is the codebase of View-Consistent Hierarchical 3D Segmentation Using Ultrametric Feature Fields.
 
+
+https://github.com/hardyho/ultrametric_feature_fields/assets/61956100/3ec7968b-db14-4527-b5c4-8fa1b2e0c8b0
+
+
 ## Enviornment
 
 Setup
