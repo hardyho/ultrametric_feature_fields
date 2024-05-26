@@ -7,7 +7,7 @@ def get_opts():
     parser.add_argument('--root_dir', type=str, required=True,
                         help='root directory of dataset')
     parser.add_argument('--dataset_name', type=str, default='nsvf',
-                        choices=['nerf', 'nsvf', 'colmap', 'nerfpp', 'rtmv'],
+                        choices=['nerf', 'partnet'],
                         help='which dataset to train/test')
     parser.add_argument('--split', type=str, default='train',
                         choices=['train', 'trainval', 'trainvaltest'],
@@ -18,8 +18,6 @@ def get_opts():
     # model parameters
     parser.add_argument('--scale', type=float, default=0.5,
                         help='scene scale (whole scene must lie in [-scale, scale]^3')
-    parser.add_argument('--use_exposure', action='store_true', default=False,
-                        help='whether to train in HDR-NeRF setting')
 
     # loss parameters
     parser.add_argument('--distortion_loss_w', type=float, default=0,
@@ -71,11 +69,34 @@ def get_opts():
 
     parser.add_argument('--feature_directory', type=str, default=None)
     parser.add_argument('--feature_dim', type=int, default=None)
-
-    parser.add_argument('--edit_config', type=str, default=None)
-
-    parser.add_argument('--clipnerf_text', type=str, default=None)
-    parser.add_argument('--clipnerf_filter_text', nargs='*', type=str, default=None)
-    parser.add_argument('--clipnerf_patch_size', type=int, default=64)
+    
+    parser.add_argument('--render_feature', action='store_true', default=False,
+                        help='use volumn rendering to get the feature map')
+    
+    
+    parser.add_argument('--ultrametric_weight', type=float, default=0.0,
+                        help='loss weight for the Ultrametric loss')
+    parser.add_argument('--euclidean_weight', type=float, default=0.0,
+                        help='loss weight for the Euclidean loss')
+    
+    parser.add_argument('--num_seg_samples', type=int, default=64, 
+                        help='number of data pairs sampling for each mask')
+    parser.add_argument('--neg_sample_ratio', type=int, default=1,
+                        help='ratio of negative samples to positive samples in segmentatin data sampling')
+    parser.add_argument('--num_seg_test', type=int, default=200,
+                        help='number of segmentation masks during 2D segentation inference')
+    
+    parser.add_argument('--load_seg', action='store_true', default=False,
+                        help='load segmentation data')
+    parser.add_argument('--depth_smooth', action='store_true', default=False,
+                        help='use depth smoothing loss')
+    parser.add_argument('--hierarchical_sampling', action='store_true', default=False,
+                        help='use hierarchical sampling')
+    parser.add_argument('--run_seg_inference', action='store_true', default=False,
+                        help='run 2D segentation inference')
+    parser.add_argument('--render_train', action='store_true', default=False,
+                        help='render images and features in the training set, needed for 3D segmentation')
+    parser.add_argument('--rotate_test', action='store_true', default=False,
+                        help='render images with additional rotation for view consistency evaluation')
 
     return parser.parse_args()

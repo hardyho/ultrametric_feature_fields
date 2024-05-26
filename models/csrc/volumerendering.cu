@@ -1,6 +1,7 @@
 #include "utils.h"
 #include <thrust/scan.h>
 
+const int MAX_FEAT_SIZE=128
 
 template <typename scalar_t>
 __global__ void composite_train_fw_kernel(
@@ -29,9 +30,9 @@ __global__ void composite_train_fw_kernel(
         const scalar_t a = 1.0f - __expf(-sigmas[s]*deltas[s]);
         const scalar_t w = a * T; // weight of the sample point
 
-        rgb[ray_idx][0] += w*rgbs[s][0];
-        rgb[ray_idx][1] += w*rgbs[s][1];
-        rgb[ray_idx][2] += w*rgbs[s][2];
+        // support feature rendering
+        for (int i = 0; i < rgbs.size(1); ++i)
+            rgb[ray_idx][i] += w*rgbs[s][i];
         depth[ray_idx] += w*ts[s];
         opacity[ray_idx] += w;
         ws[s] = w;
@@ -56,7 +57,7 @@ std::vector<torch::Tensor> composite_train_fw_cu(
 
     auto opacity = torch::zeros({N_rays}, sigmas.options());
     auto depth = torch::zeros({N_rays}, sigmas.options());
-    auto rgb = torch::zeros({N_rays, 3}, sigmas.options());
+    auto rgb = torch::zeros({N_rays, rgbs.size(1)}, sigmas.options());
     auto ws = torch::zeros({N}, sigmas.options());
     auto total_samples = torch::zeros({N_rays}, torch::dtype(torch::kLong).device(sigmas.device()));
 
@@ -109,9 +110,10 @@ __global__ void composite_train_bw_kernel(
 
     // front to back compositing
     int samples = 0;
-    scalar_t R = rgb[ray_idx][0], G = rgb[ray_idx][1], B = rgb[ray_idx][2];
     scalar_t O = opacity[ray_idx], D = depth[ray_idx];
-    scalar_t T = 1.0f, r = 0.0f, g = 0.0f, b = 0.0f, d = 0.0f;
+    scalar_t T = 1.0f, d = 0.0f;
+    float rgb_tmp[MAX_FEAT_SIZE];
+    memset(rgb_tmp, 0.0f, MAX_FEAT_SIZE);
 
     // compute prefix sum of dL_dws * ws
     // [a0, a1, a2, a3, ...] -> [a0, a0+a1, a0+a1+a2, a0+a1+a2+a3, ...]
@@ -126,19 +128,22 @@ __global__ void composite_train_bw_kernel(
         const scalar_t a = 1.0f - __expf(-sigmas[s]*deltas[s]);
         const scalar_t w = a * T;
 
-        r += w*rgbs[s][0]; g += w*rgbs[s][1]; b += w*rgbs[s][2];
         d += w*ts[s];
         T *= 1.0f-a;
 
         // compute gradients by math...
-        dL_drgbs[s][0] = dL_drgb[ray_idx][0]*w;
-        dL_drgbs[s][1] = dL_drgb[ray_idx][1]*w;
-        dL_drgbs[s][2] = dL_drgb[ray_idx][2]*w;
+        for (int i = 0; i < dL_drgb.size(1); ++i)
+        {
+            rgb_tmp[i] += w*rgbs[s][i];
+            dL_drgbs[s][i] = dL_drgb[ray_idx][i]*w;
+        }
+        
+        scalar_t tmp = 0.0f;
+        for (int i = 0; i < dL_drgb.size(1); ++i)
+            tmp += dL_drgb[ray_idx][i]*(rgbs[s][i]*T-(rgb[ray_idx][i]-rgb_tmp[i]));
 
         dL_dsigmas[s] = deltas[s] * (
-            dL_drgb[ray_idx][0]*(rgbs[s][0]*T-(R-r)) + 
-            dL_drgb[ray_idx][1]*(rgbs[s][1]*T-(G-g)) + 
-            dL_drgb[ray_idx][2]*(rgbs[s][2]*T-(B-b)) + // gradients from rgb
+            tmp + // gradients from rgb
             dL_dopacity[ray_idx]*(1-O) + // gradient from opacity
             dL_ddepth[ray_idx]*(ts[s]*T-(D-d)) + // gradient from depth
             T*dL_dws[s]-(dL_dws_times_ws_sum-dL_dws_times_ws[s]) // gradient from ws
@@ -169,7 +174,7 @@ std::vector<torch::Tensor> composite_train_bw_cu(
     const int N = sigmas.size(0), N_rays = rays_a.size(0);
 
     auto dL_dsigmas = torch::zeros({N}, sigmas.options());
-    auto dL_drgbs = torch::zeros({N, 3}, sigmas.options());
+    auto dL_drgbs = torch::zeros({N, rgb.size(1)}, sigmas.options());
 
     auto dL_dws_times_ws = dL_dws * ws; // auxiliary input
 
@@ -232,9 +237,9 @@ __global__ void composite_test_fw_kernel(
         const scalar_t a = 1.0f - __expf(-sigmas[n][s]*deltas[n][s]);
         const scalar_t w = a * T;
 
-        rgb[r][0] += w*rgbs[n][s][0];
-        rgb[r][1] += w*rgbs[n][s][1];
-        rgb[r][2] += w*rgbs[n][s][2];
+        for (int i = 0; i < rgbs.size(2); ++i)
+            rgb[r][i] += w*rgbs[n][s][i];
+
         depth[r] += w*ts[n][s];
         opacity[r] += w;
         T *= 1.0f-a;

@@ -15,6 +15,16 @@ def linear_to_srgb(img):
     img[img>1] = 1 # "clamp" tonemapper
     return img
 
+def read_seg_map(img_path, img_wh):
+    img = imageio.imread(img_path).astype(np.float32)/255.0
+    if len(img.shape) > 2:
+        img = img[..., 0]
+    if img.shape[1] != img_wh[0] or img.shape[0] != img_wh[1]:
+        img = cv2.resize(img, img_wh)
+    img = rearrange(img, 'h w -> (h w)')
+    
+    return img
+
 
 def read_image(img_path, img_wh, blend_a=True):
     img = imageio.imread(img_path).astype(np.float32)/255.0

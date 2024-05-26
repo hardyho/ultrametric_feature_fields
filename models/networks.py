@@ -33,9 +33,9 @@ class NGP(nn.Module):
             torch.zeros(self.cascades*self.grid_size**3//8, dtype=torch.uint8))
 
         # constants
-        L = 16; F = 2; log2_T = 19; N_min = 16
+        L = 17; F = 4; log2_T = 20; N_min = 16
 
-        self.use_smooth_encoding = True
+        self.use_smooth_encoding = False
         if self.use_smooth_encoding:
             b = np.exp(np.log(512*scale/N_min)/(L-1))
             encoding_config = {
@@ -43,7 +43,7 @@ class NGP(nn.Module):
 	        "nested": [
                     {
                         "otype": "Grid",
-	                "type": "Hash",
+	                    "type": "Hash",
                         "n_levels": L,
                         "n_features_per_level": F,
                         "log2_hashmap_size": log2_T,
@@ -80,7 +80,7 @@ class NGP(nn.Module):
             b = np.exp(np.log(2048*scale/N_min)/(L-1))
             encoding_config = {
                 "otype": "Grid",
-	        "type": "Hash",
+	            "type": "Hash",
                 "n_levels": L,
                 "n_features_per_level": F,
                 "log2_hashmap_size": log2_T,
@@ -139,58 +139,58 @@ class NGP(nn.Module):
                         }
                     )
                 setattr(self, f'tonemapper_net_{i}', tonemapper_net)
-
+                
+        
+        
         if self.feature_out_dim is not None:
-            L = 16; F = 2; log2_T = 19; N_min = 16
-            # b = np.exp(np.log(2048*scale/N_min)/(L-1))
-            b = np.exp(np.log(128*scale/N_min)/(L-1))  # feature is of lower-frequency
-            self.feature_encoder = tcnn.NetworkWithInputEncoding(
-                n_input_dims=6, n_output_dims=self.feature_out_dim,
-                encoding_config={
-                    "otype": "Composite",
-	            "nested": [
-                        {
-                            "otype": "Grid",
-	                    "type": "Hash",
-                            "n_levels": L,
-                            "n_features_per_level": F,
-                            "log2_hashmap_size": log2_T,
-                            "base_resolution": N_min,
-                            "per_level_scale": b,
-                            "n_dims_to_encode": 3,
-                            "interpolation": "Linear"
-                        },
-                        {
-	                    "otype": "Frequency",
-	                    "n_frequencies": 8,
-                            "n_dims_to_encode": 3,
-                        }
-                    ]},
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": 128,
-                    "n_hidden_layers": 2,
-                }
-            )
-            # TODO: separate the final layer and make efficient queried dot product by layer-query fusion
-            """
-            self.basenet_to_feature = tcnn.Network(
-                n_input_dims=32 if self.use_smooth_encoding else 16,
-                n_output_dims=self.feature_out_dim,
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": 32,
-                    "n_hidden_layers": 1,
-                }
-            )
-            """
-        else:
-            self.feature_encoder = None
-
+            L = 17; F = 4; log2_T = 20; N_min = 16
+            b = np.exp(np.log(128*scale/N_min)/(L-1)) # feature is of lower-frequency
+            self.feature_mlp = tcnn.Network(
+                                        # n_input_dims=80 if self.use_smooth_encoding else 32, n_output_dims=self.feature_out_dim,
+                                        n_input_dims=80 if self.use_smooth_encoding else 68, n_output_dims=self.feature_out_dim,
+                                        network_config={
+                                            "otype": "FullyFusedMLP",
+                                            "activation": "ReLU",
+                                            "output_activation": "None",
+                                            "n_neurons": 128,
+                                            "n_hidden_layers": 2,
+                                        }
+                                    )
+            
+            self.feat_encoder = tcnn.Encoding(
+                                n_input_dims=6 if self.use_smooth_encoding else 3,
+                                encoding_config={
+                                    "otype": "Composite",
+                                "nested": [
+                                        {
+                                            "otype": "Grid",
+                                            "type": "Hash",
+                                            "n_levels": L,
+                                            "n_features_per_level": F,
+                                            "log2_hashmap_size": log2_T,
+                                            "base_resolution": N_min,
+                                            "per_level_scale": b,
+                                            "n_dims_to_encode": 3,
+                                            "interpolation": "Linear"
+                                        },
+                                        {
+                                        "otype": "Frequency",
+                                        "n_frequencies": 8,
+                                            "n_dims_to_encode": 3,
+                                        }
+                                    ] if self.use_smooth_encoding else [
+                                        {
+                                            "otype": "Grid",
+                                            "type": "Hash",
+                                            "n_levels": L,
+                                            "n_features_per_level": F,
+                                            "log2_hashmap_size": log2_T,
+                                            "base_resolution": N_min,
+                                            "per_level_scale": b,
+                                            "n_dims_to_encode": 3,
+                                            "interpolation": "Linear"
+                                        }]})
+            
     def density(self, x, return_feat=False):
         """
         Inputs:
@@ -270,9 +270,8 @@ class NGP(nn.Module):
             assert self.rgb_act == 'Sigmoid'
             rgbs = torch.sigmoid(rgbs)
 
-        if self.feature_encoder is not None and not kwargs.get('skip_feature', False):
-            features = self.encode_feature(x)
-            # features = features + self.basenet_to_feature(h.detach())
+        if not kwargs.get('skip_feature', False):
+            features = self.encode_feature(x.detach())
             return sigmas, rgbs, features
         else:
             return sigmas, rgbs
@@ -280,9 +279,9 @@ class NGP(nn.Module):
     def encode_feature(self, x):
         x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min)
         if self.use_smooth_encoding:
-            features = self.feature_encoder(torch.cat([x, x], dim=-1))
-        else:
-            features = self.feature_encoder(x)
+            x = torch.cat([x, x], dim=-1)
+        x = self.feat_encoder(x)
+        features = self.feature_mlp(x)
         return features
 
     @torch.no_grad()
@@ -404,30 +403,6 @@ class NGP(nn.Module):
 
         vren.packbits(self.density_grid, min(mean_density, density_threshold),
                       self.density_bitfield)
-
-    def calculate_selection_score_from_xyz(self, x, query_features=None):
-        features = self.encode_feature(x)
-        return self.calculate_selection_score(features, query_features)
-
-    def calculate_selection_score(self, features, query_features=None):
-        features /= features.norm(dim=-1, keepdim=True)
-        if query_features is None:
-            query_features = self.query_features
-        query_features /= query_features.norm(dim=-1, keepdim=True)
-        scores = features.half() @ query_features.T.half()  # (N_points, n_texts)
-        if scores.shape[-1] == 1:
-            score_threshold = self.score_threshold if self.score_threshold is not None else 0.4
-            scores = scores[:, 0]  # (N_points,)
-            scores = (scores >= score_threshold).float()
-        else:
-            scores = torch.nn.functional.softmax(scores, dim=-1)  # (N_points, n_texts)
-            if self.score_threshold is not None:
-                scores = scores[:, self.positive_ids].sum(-1)  # (N_points, )
-                scores = (scores >= self.score_threshold).float()
-            else:
-                scores[:, self.positive_ids[0]] = scores[:, self.positive_ids].sum(-1)  # (N_points, )
-                scores = torch.isin(torch.argmax(scores, dim=-1), torch.tensor(self.positive_ids).cuda()).float()
-        return scores
 
     def sample_density(self, density_threshold, warmup=False):
         density_grid_tmp = 0

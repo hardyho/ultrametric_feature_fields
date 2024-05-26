@@ -5,19 +5,19 @@ import os
 from tqdm import tqdm
 
 from .ray_utils import get_ray_directions
-from .color_utils import read_image
+from .color_utils import read_image, read_seg_map
 
 from .base import BaseDataset
 
 
 class NeRFDataset(BaseDataset):
-    def __init__(self, root_dir, split='train', downsample=1.0, **kwargs):
-        super().__init__(root_dir, split, downsample)
+    def __init__(self, root_dir, split='train', downsample=1.0, len_per_epoch=1000, **kwargs):
+        super().__init__(root_dir, split, downsample, len_per_epoch)
 
         self.read_intrinsics()
 
         if kwargs.get('read_meta', True):
-            self.read_meta(split)
+            self.read_meta(split, **kwargs)
 
     def read_intrinsics(self):
         with open(os.path.join(self.root_dir, "transforms_train.json"), 'r') as f:
@@ -34,21 +34,48 @@ class NeRFDataset(BaseDataset):
         self.directions = get_ray_directions(h, w, self.K)
         self.img_wh = (w, h)
 
-    def read_meta(self, split):
+    def read_meta(self, split, **kwargs):
         self.rays = []
         self.poses = []
+        
+        self.num_seg_samples = kwargs.get('num_seg_samples', 64) 
+        self.neg_sample_ratio = kwargs.get('neg_sample_ratio', 1)
+        self.render_train = kwargs.get('render_train', False)
+        self.rotate_test = kwargs.get('rotate_test', False)
+        self.load_depth_smooth = kwargs.get('load_depth_smooth', False)
+        self.hierarchical_sampling = kwargs.get('hierarchical_sampling', False)
 
+            
         if split == 'trainval':
             with open(os.path.join(self.root_dir, "transforms_train.json"), 'r') as f:
                 frames = json.load(f)["frames"]
             with open(os.path.join(self.root_dir, "transforms_val.json"), 'r') as f:
                 frames+= json.load(f)["frames"]
+        elif self.rotate_test and split == 'val':
+            # TODO
+            pass
         else:
             with open(os.path.join(self.root_dir, f"transforms_{split}.json"), 'r') as f:
                 frames = json.load(f)["frames"]
+        
+        if self.render_train and split == 'val':
+            with open(os.path.join(self.root_dir, f"transforms_train.json"), 'r') as f:
+                    frames = json.load(f)["frames"][::2] + frames
 
+        if kwargs.get('load_seg', False):
+            # TODO: on-the-fly encoding
+            seg_folder =  os.path.join(self.root_dir, f'{split}_seg')
+            seg_hierarchy_folder = os.path.join(self.root_dir, f'{split}_seg_hierarchy')
+            seg_paths = [os.path.join(seg_folder, os.path.splitext(frame['file_path'])[0].split('/')[-1]) for frame in frames]
+        else:
+            seg_paths = []
+            
+        self.features = []
+        self.seg = []
+        self.seg_hierarchy = []
+            
         print(f'Loading {len(frames)} {split} images ...')
-        for frame in tqdm(frames):
+        for i, frame in tqdm(enumerate(frames)):
             c2w = np.array(frame['transform_matrix'])[:3, :4]
 
             # determine scale
@@ -79,12 +106,19 @@ class NeRFDataset(BaseDataset):
                     c2w[0, 3] -= 0.7
             self.poses += [c2w]
 
-            try:
-                img_path = os.path.join(self.root_dir, f"{frame['file_path']}.png")
-                img = read_image(img_path, self.img_wh)
-                self.rays += [img]
-            except: pass
+            
+            img_path = os.path.join(self.root_dir, f"{frame['file_path']}.png")
+            img = read_image(img_path, self.img_wh)
+            self.rays += [img]
+            
+            if seg_paths:
+                self.seg.append(torch.tensor([read_seg_map(os.path.join(seg_paths[i], name), self.img_wh) for name in sorted(os.listdir(seg_paths[i])) 
+                                    if name.endswith('png')], dtype=bool))
+                self.seg_hierarchy.append((torch.tensor(np.load(os.path.join(seg_hierarchy_folder, img_path.split('/')[-1][:-4] + '_inside.npy'))),
+                                            torch.tensor(np.load(os.path.join(seg_hierarchy_folder, img_path.split('/')[-1][:-4] + '_same.npy')))))
+                        
 
         if len(self.rays)>0:
             self.rays = torch.FloatTensor(np.stack(self.rays)) # (N_images, hw, ?)
+            
         self.poses = torch.FloatTensor(self.poses) # (N_images, 3, 4)

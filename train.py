@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 from opt import get_opts
 import os
 import glob
@@ -7,7 +8,11 @@ import imageio
 import numpy as np
 import cv2
 from einops import rearrange
+from graph import get_ultrametric
+import scipy.sparse as sp 
 import os
+import random
+import math
 import time
 os.environ["TORCH_HOME"] = "/tmp/torch/"
 
@@ -37,16 +42,14 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.utilities.distributed import all_gather_ddp_if_available
 
 from utils import slim_ckpt, load_ckpt
 
 import warnings; warnings.filterwarnings("ignore")
 
-import clip
 import yaml
-from clip_utils import CLIPEditor
 
 
 def depth2img(depth):
@@ -66,6 +69,7 @@ class NeRFSystem(LightningModule):
         self.update_interval = 16
 
         self.loss = NeRFLoss(lambda_distortion=self.hparams.distortion_loss_w)
+        self.seg_loss = nn.BCEWithLogitsLoss()
         self.train_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1)
@@ -74,7 +78,7 @@ class NeRFSystem(LightningModule):
             for p in self.val_lpips.net.parameters():
                 p.requires_grad = False
 
-        rgb_act = 'None' if self.hparams.use_exposure else 'Sigmoid'
+        rgb_act = 'Sigmoid'
         if hparams.feature_directory is not None:
             assert hparams.feature_dim is not None, "set feature_dim for using feature field"
         self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act,
@@ -84,95 +88,7 @@ class NeRFSystem(LightningModule):
             torch.zeros(self.model.cascades, G**3))
         self.model.register_buffer('grid_coords',
             create_meshgrid3d(G, G, G, False, dtype=torch.int32).reshape(-1, 3))
-
-        # edit
-        if hparams.edit_config is not None or hparams.clipnerf_text is not None:
-            self.clip_editor = CLIPEditor()
-        """
-        if hparams.edit_config is not None:
-            with open(hparams.edit_config, 'r') as f:
-                edit_config = yaml.safe_load(f)
-
-            # setup query
-            self.model.positive_ids = edit_config.positive_ids
-            self.model.score_threshold = edit_config.score_threshold
-            if edit_config.query.query_type == "text":
-                #clip_model, _ = clip.load("ViT-B/32", device="cuda")
-                #tokenized_texts = clip.tokenize(edit_config.query.texts)
-                #with torch.no_grad():
-                #    text_features = clip_model.encode_text(tokenized_texts)
-                #    text_features /= text_features.norm(dim=-1, keepdim=True)
-                self.model.query_features = self.clip_editor.encode_text(edit_config.query.texts.replace('_', ' '))
-            else:
-                raise NotImplementedError
-
-            # setup editing
-            self.edit_dict = {}
-            for op in edit_config.operations:
-                if op.edit_type == "deletion":
-                    self.edit_dict["deletion"] = True
-                elif op.edit_type == "color_func":
-                    self.edit_dict["color_func"] = eval(op.func_str)
-                else:
-                    raise NotImplementedError
-        else:
-            self.model.query_features = None
-        """
-
-        # clipnerf
-        if hparams.clipnerf_text is not None:
-            self.clip_editor.text_features = self.clip_editor.encode_text([hparams.clipnerf_text.replace('_', ' ')])
-        if hparams.clipnerf_filter_text is not None:
-            self.clip_editor.text_filter_features = self.clip_editor.encode_text(
-                [t.replace('_', ' ') for t in hparams.clipnerf_filter_text])
-            print([t.replace('_', ' ') for t in hparams.clipnerf_filter_text])
-            print(self.clip_editor.text_filter_features @ self.clip_editor.text_filter_features.T)
-
-
-    def calculate_clip_loss(self, results, batch):
-        patch_size = self.train_dataset.patch_size
-        rendered_patch = results['rgb'].reshape(1, patch_size, patch_size, 3).permute(0, 3, 1, 2)  # (nhw,c) -> (n,c,h,w)
-        gt_patch = batch['rgb'].reshape(1, patch_size, patch_size, 3).permute(0, 3, 1, 2)  # (n,c,h,w)
-
-        # detach pixels of non-queried regions
-        if self.clip_editor.text_filter_features is not None:
-            rendered_features = results['feature']
-            scores = self.model.calculate_selection_score(rendered_features, query_features=self.clip_editor.text_filter_features)
-            score_patch = scores.reshape(1, patch_size, patch_size, 1).permute(0, 3, 1, 2).detach()
-            rendered_patch = rendered_patch * score_patch + rendered_patch.detach() * (1 - score_patch)
-
-        # make rendered patch (with/without augmentations) similar to target text via clip
-        sample_N_aug = 5  # N random augmentations
-        clip_emb = self.clip_editor.encode_image(rendered_patch, preprocess=True, stochastic=sample_N_aug)  # (N_aug, dim)
-        clip_loss = 1.0 - (self.clip_editor.text_features.float()[None] * clip_emb).sum(dim=-1)
-        losses = {'cliploss': clip_loss.mean()}
-
-        # render for debug
-        render_for_debug = False
-        if render_for_debug:
-            rgb_pred = (rendered_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)  # (h,w,c)
-            imageio.imsave('tmpdebug_{}__{}.png'.format(time.time(), clip_loss.mean()), rgb_pred)
-            if self.clip_editor.text_filter_features is not None:
-                score_pred = (score_patch.detach().permute(0, 2, 3, 1)[0].cpu().numpy()*255).astype(np.uint8)[:, :, 0]  # (h,w)
-                imageio.imsave('tmpdebug_{}__{}_score.png'.format(time.time(), clip_loss.mean()), score_pred)                
-                feat_patch = rendered_features.reshape(1, patch_size, patch_size, -1)[0, :, :, :3]
-                feat_patch = (feat_patch - feat_patch.min()) / (feat_patch.max() - feat_patch.min())
-                feat_pred = (feat_patch.detach().cpu().numpy()*255).astype(np.uint8)  # (h,w,c)
-                imageio.imsave('tmpdebug_{}__{}_feat.png'.format(time.time(), clip_loss.mean()), feat_pred)
-
-        # preserve original scene in non-queried regions as possible
-        preserve_original = True
-        if preserve_original:
-            if self.clip_editor.text_filter_features is not None:
-                rendered_patch = results['rgb'].reshape(1, patch_size, patch_size, 3).permute(0, 3, 1, 2)
-                rendered_patch = rendered_patch * (1 - score_patch) \
-                                 + rendered_patch.detach() * score_patch
-            rgb_loss_gt = ((rendered_patch - gt_patch) ** 2)
-            losses['rgb_loss_gt'] = rgb_loss_gt.mean() * 10.0
-            # clip_emb_gt = self.clip_editor.encode_image(gt_patch, preprocess=True, stochastic=sample_N_aug)[0].detach()
-            # clip_loss_gt = 1.0 - (clip_emb * clip_emb_gt).sum(dim=-1)
-            # losses['cliploss_gt'] = clip_loss_gt.mean()
-        return losses
+        
 
     def forward(self, batch, split, detach_geometry=False):
         if split=='train':
@@ -191,11 +107,17 @@ class NeRFSystem(LightningModule):
 
         kwargs = {'test_time': split!='train',
                   'random_bg': self.hparams.random_bg,
+                  'black_bg': self.hparams.dataset_name == 'partnet',
                   'detach_geometry': detach_geometry}
         if self.hparams.scale > 0.5:
             kwargs['exp_step_factor'] = 1/256
-        if self.hparams.use_exposure:
-            kwargs['exposure'] = batch['exposure']
+        if self.hparams.dataset_name == 'nerf' or self.hparams.dataset_name == 'partnet':
+            kwargs['exp_step_factor'] = 0
+            
+        if self.hparams.depth_smooth and split=='train':
+            kwargs['depth_smooth_samples_num'] = batch['depth_smooth_samples_num']
+        else:
+            batch['depth_smooth_samples_num'] = 0
         if split=='test':
             kwargs['render_feature'] = True
 
@@ -205,18 +127,28 @@ class NeRFSystem(LightningModule):
         dataset = dataset_dict[self.hparams.dataset_name]
         kwargs = {'root_dir': self.hparams.root_dir,
                   'downsample': self.hparams.downsample}
-        if self.hparams.clipnerf_text is not None:
-            kwargs['len_per_epoch'] = 200  # often sufficient
+        
         self.train_dataset = dataset(split=self.hparams.split,
                                      load_features=hparams.feature_directory is not None,
                                      feature_directory=hparams.feature_directory,
+                                     load_seg=hparams.load_seg,
+                                     load_depth_smooth=hparams.depth_smooth,
+                                     hierarchical_sampling=hparams.hierarchical_sampling,
+                                     num_seg_samples=hparams.num_seg_samples,
+                                     neg_sample_ratio=hparams.neg_sample_ratio,
                                      **kwargs)
         self.train_dataset.batch_size = self.hparams.batch_size
         self.train_dataset.ray_sampling_strategy = self.hparams.ray_sampling_strategy
-        if self.hparams.clipnerf_text is not None:
-            self.train_dataset.patch_size = self.hparams.clipnerf_patch_size
 
-        self.test_dataset = dataset(split='test', **kwargs)
+
+        self.test_dataset = dataset(split='val', 
+                                    load_seg=hparams.load_seg,
+                                    num_seg_samples=hparams.num_seg_samples,
+                                    neg_sample_ratio=hparams.neg_sample_ratio,
+                                    rotate_test=hparams.rotate_test,
+                                    render_train=hparams.render_train,
+                                    **kwargs)
+        self.test_dataset.batch_size = self.hparams.batch_size
 
     def configure_optimizers(self):
         # define additional parameters
@@ -263,6 +195,7 @@ class NeRFSystem(LightningModule):
                           pin_memory=True)
 
     def on_train_start(self):
+        torch.cuda.empty_cache()
         self.model.mark_invisible_cells(self.train_dataset.K.to(self.device),
                                         self.poses,
                                         self.train_dataset.img_wh)
@@ -272,31 +205,70 @@ class NeRFSystem(LightningModule):
             self.model.update_density_grid(0.01*MAX_SAMPLES/3**0.5,
                                            warmup=self.global_step<self.warmup_steps,
                                            erode=self.hparams.dataset_name=='colmap')
+        
+        results = self(batch, split='train')
+        loss_d = self.loss(results, batch)
 
-        if self.hparams.clipnerf_text is not None:
-            # TODO: generate random poses + training poses
-            results = self(batch, split='train', detach_geometry=True)
-            loss_d = self.calculate_clip_loss(results, batch)
-        else:
-            results = self(batch, split='train')
-            loss_d = self.loss(results, batch)
-
-            if self.global_step % (2*self.update_interval) == 0 and self.hparams.clipnerf_text is None:
-                # regularization for cleaning
-                loss_d['density_mean'] = self.model.sample_density(
-                    0.01*MAX_SAMPLES/3**0.5, warmup=self.global_step<self.warmup_steps).mean() * 1e-4
+        if self.global_step % (2*self.update_interval) == 0:
+            # regularization for cleaning
+            loss_d['density_mean'] = self.model.sample_density(
+                0.01*MAX_SAMPLES/3**0.5, warmup=self.global_step<self.warmup_steps).mean() * 1e-4
 
         # feature loss
-        if 'feature' in results and self.hparams.clipnerf_text is None:
-            loss_d['feature'] = ((results['feature'] - batch['feature']) ** 2).sum(-1).mean() * 1e-2
-            self.log('train/loss_f', loss_d['feature'])
+        if 'feature' in results:
+            loss_d['norm'] = (results['norm'] - 1) ** 2
+            if self.hparams.ultrametric_weight != 0:
+                positive_distance = get_ultrametric(results['feature'], 
+                                                    results['rays_d'], 
+                                                    batch['seg_positives'], batch['seg_masks'], visualize=(self.global_step%200==0),
+                                                    pix_ids = batch['pix_idxs'], img_wh=batch['img_wh'])
+                
+                negative_distance = get_ultrametric(results['feature'], 
+                                                    results['rays_d'], 
+                                                    batch['seg_negatives'], batch['seg_masks'])
+                
+                N_mask, N_pairs = positive_distance.shape
+                distances = torch.cat((positive_distance.reshape(N_mask * N_pairs, 1), negative_distance.reshape(N_mask * N_pairs, self.hparams.neg_sample_ratio)), dim=-1)
+                
+                temperature = 0.1
+                distances = distances / temperature
+                labels = torch.zeros((N_mask * N_pairs), dtype=torch.long).cuda()
+                loss_d['loss_seg_ultrametric'] = F.cross_entropy(distances, labels) * self.hparams.ultrametric_weight
+            if self.hparams.euclidean_weight != 0:
+                # print(batch['seg_pix_idxs'].shape, batch['seg_negatives'].shape, batch['seg_positives'].shape)
+                positive_distance = (results['feature'][batch['seg_positives'][..., 0]] *
+                                    results['feature'][batch['seg_positives'][..., 1]]).sum(-1) # 
+                negative_distance = (results['feature'][batch['seg_negatives'][..., 0]] *
+                                    results['feature'][batch['seg_negatives'][..., 1]]).sum(-1)  # 
+                
+                N_mask, N_pairs = positive_distance.shape
+                distances = torch.cat((positive_distance.reshape(N_mask * N_pairs, 1), negative_distance.reshape(N_mask * N_pairs, self.hparams.neg_sample_ratio)), dim=-1)
+                
+                temperature = 0.1
+                distances = distances / temperature
+                labels = torch.zeros((N_mask * N_pairs), dtype=torch.long).cuda()
+                loss_d['loss_seg_euclidean'] = F.cross_entropy(distances, labels) * self.hparams.euclidean_weight
+                print(loss_d['loss_seg_euclidean'])
+                
+            # if self.hparams.dataset_name == 'nerf' or self.hparams.dataset_name == 'partnet':
+            #     loss_d['loss_seg_bg'] = ((results['feature'][(batch['rgb'] < 0.99).any(dim=-1)].sum(-1) / 
+            #                                 math.sqrt(results['feature'].shape[-1]) - 0.6).clip(min=0))
+        
+            
+        # Add the depth smoothing loss after 5 epochs 
+        if self.hparams.depth_smooth and self.current_epoch > 2:
+            loss_d['loss_depth_smooth'] = loss_d['norm'] * 0
+            EPS = 1e-2
+            depth_pairs = results['depth_sup'][:batch['depth_smooth_samples_num']].reshape(-1, 4)
+            # Only supervising high-opacity pixels to avoid noise
+            mask = (results['opacity_sup'][:batch['depth_smooth_samples_num']].reshape(-1, 4) > 0.9).all(dim=-1)
+            depth_pairs = depth_pairs[mask]
+            
+            if mask.any():
+                loss_d['loss_depth_smooth'] = torch.clip(torch.abs(depth_pairs[:, 0] - 3 * depth_pairs[:, 1] + 3 * depth_pairs[:, 2] - depth_pairs[:, 3]) / 
+                                                    (depth_pairs.max(dim=1)[0].detach() + EPS) ** 3 - 0.1, 0).mean() 
+           
 
-        if self.hparams.use_exposure:
-            zero_radiance = torch.zeros(1, 3, device=self.device)
-            unit_exposure_rgb = self.model.log_radiance_to_rgb(zero_radiance,
-                                    **{'exposure': torch.ones(1, 1, device=self.device)})
-            loss_d['unit_exposure'] = \
-                0.5*(unit_exposure_rgb-self.train_dataset.unit_exposure_rgb)**2
         loss = sum(lo.mean() for lo in loss_d.values())
 
         with torch.no_grad():
@@ -314,22 +286,22 @@ class NeRFSystem(LightningModule):
 
     def on_validation_start(self):
         torch.cuda.empty_cache()
-        if not self.hparams.no_save_test:
-            self.val_dir = f'results/{self.hparams.dataset_name}/{self.hparams.exp_name}'
+        if (not self.hparams.no_save_test):
+            self.val_dir = f'results/{self.hparams.dataset_name}/{self.hparams.exp_name}/{self.current_epoch}'
             os.makedirs(self.val_dir, exist_ok=True)
 
-    def validation_step(self, batch, batch_nb):
-        rgb_gt = batch['rgb']
+    def validation_step(self, batch, batch_nb):       
+        logs = {}
+        w, h = self.train_dataset.img_wh
         with torch.no_grad():
             results = self(batch, split='test')
-
-        logs = {}
+            
         # compute each metric per image
+        rgb_gt = batch['rgb']
         self.val_psnr(results['rgb'], rgb_gt)
         logs['psnr'] = self.val_psnr.compute()
         self.val_psnr.reset()
-
-        w, h = self.train_dataset.img_wh
+        
         rgb_pred = rearrange(results['rgb'], '(h w) c -> 1 c h w', h=h)
         rgb_gt = rearrange(rgb_gt, '(h w) c -> 1 c h w', h=h)
         self.val_ssim(rgb_pred, rgb_gt)
@@ -337,23 +309,78 @@ class NeRFSystem(LightningModule):
         self.val_ssim.reset()
         if self.hparams.eval_lpips:
             self.val_lpips(torch.clip(rgb_pred*2-1, -1, 1),
-                           torch.clip(rgb_gt*2-1, -1, 1))
+                        torch.clip(rgb_gt*2-1, -1, 1))
             logs['lpips'] = self.val_lpips.compute()
             self.val_lpips.reset()
 
-        if not self.hparams.no_save_test: # save test image to disk
-            idx = batch['img_idxs']
-            rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
-            rgb_pred = (rgb_pred*255).astype(np.uint8)
-            depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
-            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}.png'), rgb_pred)
-            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+        # Get per-frame 2D segmentation result with the watershed transform algorithm
+        def get_segmentation(feat, distance, num_keep, h, w):
+            rows = []
+            cols = []
 
+            # Building the graph
+            rows.append(torch.arange(0, (h-1) * w))
+            cols.append(torch.arange(w, h*w))
+            rows.append(torch.tensor([i for i in range(h*w) if i % w != (w-1)]))
+            cols.append(torch.tensor([(i + 1) for i in range(h*w) if i % w != (w-1)]))
+            rows = torch.cat(rows)
+            cols = torch.cat(cols)
+            data = (((feat[rows] - feat[cols]) ** 2).sum(-1) + 1e-8).sqrt()
+            rows = rows[data < distance]
+            cols = cols[data < distance]
+            data = data[data < distance]
+
+            graph = sp.csr_matrix((data.cpu().numpy(), (rows.cpu().numpy(), cols.cpu().numpy())), shape=(len(feat), len(feat)))
+            num_components, segmentation = sp.csgraph.connected_components(graph, connection='weak')
+            
+            count = np.histogram(segmentation, bins=[i for i in range(segmentation.max() + 2)])[0]
+            
+            # Reassign the id according to the size of each mask
+            segmentation = count.argsort()[::-1].argsort()[segmentation]
+            segmentation[segmentation > num_keep] = num_keep # keep the num_keep largest masks
+            
+            return segmentation
+        
+        if self.hparams.run_seg_inference:
+            colors = np.random.randint(0, 256, (self.hparams.num_seg_test + 1, 3))
+            colors[-1] = 255
+            
+        if (not self.hparams.no_save_test): # save test image to disk
+            idx = batch['img_idxs']     
+            
+            segmentations = []
+            distances = [(i+1) * 0.01 for i in range(100)]
+
+            if self.current_epoch == self.hparams.num_epochs - 1 and self.hparams.run_seg_inference:
+                for distance in distances:
+                    segmentation = get_segmentation(results['feature'], distance, self.hparams.num_seg_test, h, w)
+                    segmentations.append(segmentation)
+                    
+                    segmentation_map = rearrange(segmentation, '(h w) -> h w', h=h)
+                    segmentation_map = (colors[segmentation_map]).astype(np.uint8)
+                    seg_dir = os.path.join(self.val_dir, f'{idx:03d}_s')
+                    os.makedirs(seg_dir, exist_ok=True)
+                    imageio.imsave(os.path.join(seg_dir, f'{distance:.3f}.png'), segmentation_map)
+
+                if self.hparams.rotate_test:
+                    # There's no ground truth for rotate_test mode
+                    accuracy = torch.tensor(0.)
+                else:
+                    segmentations = torch.stack([torch.tensor(s).cuda() for s in segmentations])
+                    accuracy, indices = (((segmentations[:, batch['seg_positives'][..., 0]] == segmentations[:, batch['seg_positives'][..., 1]]).sum(-1) / batch['seg_positives'].shape[1] + 
+                                        (segmentations[:, batch['seg_negatives'][..., 0]] != segmentations[:, batch['seg_negatives'][..., 1]]).sum(-1) / batch['seg_negatives'].shape[1])/2).max(dim=0)
+                    accuracy = accuracy.mean()
+            
+            else:
+                accuracy = torch.tensor(0.)
+                
+            logs['acc'] = accuracy
+                
             # visualize PCA feature
             with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float32):
                 if not hasattr(self, 'proj_V'):
                     U, S, V = torch.pca_lowrank(
-                        (results['feature'] - results['feature'].mean(0)[None]).float(),
+                        (results['feature']).float(),
                         niter=5)
                     self.proj_V = V[:, :3].float()
                     lowrank = torch.matmul(results['feature'].float(), self.proj_V)
@@ -362,16 +389,31 @@ class NeRFSystem(LightningModule):
                 else:
                     lowrank = torch.matmul(results['feature'].float(), self.proj_V)
                 lowrank = ((lowrank - lowrank.min(0, keepdim=True)[0]) / (lowrank.max(0, keepdim=True)[0] - lowrank.min(0, keepdim=True)[0])).clip(0, 1)
-
                 visfeat = rearrange(lowrank.cpu().numpy(), '(h w) c -> h w c', h=h)
                 visfeat = (visfeat*255).astype(np.uint8)
-                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_f.png'), visfeat)
+                if self.current_epoch % 5 == 0 or self.current_epoch == self.hparams.num_epochs - 1:  
+                    imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_f.png'), visfeat)
 
             rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_pred = (rgb_pred*255).astype(np.uint8)
-            depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
-            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}.png'), rgb_pred)
-            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+            
+            if self.current_epoch % 1 == 0 or self.current_epoch == self.hparams.num_epochs - 1:  
+                depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
+                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}.png'), rgb_pred)
+                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+                
+            if self.current_epoch == self.hparams.num_epochs - 1:
+                np.save(os.path.join(self.val_dir, f'{idx:03d}_d.npy'), results['depth'].cpu().numpy())
+                np.save(os.path.join(self.val_dir, f'{idx:03d}_p.npy'), batch['pose'].cpu().numpy())
+                np.save(os.path.join(self.val_dir, f'intrinsic.npy'), batch['intrinsic'].cpu().numpy())
+                
+                torch.save(results['feature'].detach().cpu(), os.path.join(self.val_dir, f'{idx:03d}_f.pth'))
+                
+                if 'surface' in results:
+                    surface = rearrange(results['surface'].cpu().numpy(), '(h w) c -> h w c', h=h)
+                    with open(os.path.join(self.val_dir, f'{idx:03d}_surface.npy'), 'wb') as f:
+                        np.save(f, surface)
+                        print('Surface saved.')
 
         return logs
 
@@ -383,7 +425,18 @@ class NeRFSystem(LightningModule):
         ssims = torch.stack([x['ssim'] for x in outputs])
         mean_ssim = all_gather_ddp_if_available(ssims).mean()
         self.log('test/ssim', mean_ssim)
+            
+        if 'acc' in outputs[0]:
+            accs = torch.stack([x['acc'] for x in outputs])
+            mean_acc = all_gather_ddp_if_available(accs).mean()
+            self.log('test/acc', mean_acc)
+            print("Accuracy:", mean_acc)
 
+        if 'beta' in outputs[0]:
+            betas = torch.stack([x['beta'] for x in outputs])
+            mean_beta = all_gather_ddp_if_available(betas).mean()
+            self.log('test/beta', mean_beta)
+            
         if self.hparams.eval_lpips:
             lpipss = torch.stack([x['lpips'] for x in outputs])
             mean_lpips = all_gather_ddp_if_available(lpipss).mean()
@@ -395,7 +448,6 @@ class NeRFSystem(LightningModule):
         items.pop("v_num", None)
         return items
 
-
 if __name__ == '__main__':
     hparams = get_opts()
     if hparams.val_only and (not hparams.ckpt_path):
@@ -404,21 +456,20 @@ if __name__ == '__main__':
 
     ckpt_cb = ModelCheckpoint(dirpath=f'ckpts/{hparams.dataset_name}/{hparams.exp_name}',
                               filename='{epoch:d}',
-                              save_weights_only=True,
+                              save_weights_only=False,
                               every_n_epochs=hparams.num_epochs,
                               save_on_train_epoch_end=True,
                               save_top_k=-1)
     callbacks = [ckpt_cb, TQDMProgressBar(refresh_rate=1)]
 
-    logger = TensorBoardLogger(save_dir=f"logs/{hparams.dataset_name}",
-                               name=hparams.exp_name,
-                               default_hp_metric=False)
+    logger = WandbLogger(save_dir=f"logs/{hparams.dataset_name}",
+                               name=hparams.exp_name)
 
     trainer = Trainer(max_epochs=hparams.num_epochs,
-                      check_val_every_n_epoch=hparams.num_epochs,
+                      check_val_every_n_epoch=1,
                       callbacks=callbacks,
                       logger=logger,
-                      # log_every_n_steps=5,
+                      log_every_n_steps=50,
                       enable_model_summary=False,
                       accelerator='gpu',
                       devices=hparams.num_gpus,
@@ -438,14 +489,3 @@ if __name__ == '__main__':
                       save_poses=hparams.optimize_ext)
         torch.save(ckpt_, f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
         print(f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
-
-    if (not hparams.no_save_test) and \
-       hparams.dataset_name=='nsvf' and \
-       'Synthetic' in hparams.root_dir: # save video
-        imgs = sorted(glob.glob(os.path.join(system.val_dir, '*.png')))
-        imageio.mimsave(os.path.join(system.val_dir, 'rgb.mp4'),
-                        [imageio.imread(img) for img in imgs[::2]],
-                        fps=30, macro_block_size=1)
-        imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
-                        [imageio.imread(img) for img in imgs[1::2]],
-                        fps=30, macro_block_size=1)

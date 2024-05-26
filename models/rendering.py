@@ -3,6 +3,9 @@ from .custom_functions import \
     RayAABBIntersector, RayMarcher, VolumeRenderer
 from einops import rearrange
 import vren
+import random
+import tqdm
+import math
 
 MAX_SAMPLES = 1024
 NEAR_DISTANCE = 0.01
@@ -34,6 +37,14 @@ def render(model, rays_o, rays_d, **kwargs):
         render_func = __render_rays_train
 
     results = render_func(model, rays_o, rays_d, hits_t, **kwargs)
+    if kwargs.get('test_time', False) and kwargs.get('density_scale', 1.0) != 1.0:
+        _, hits_t, _ = \
+            RayAABBIntersector.apply(rays_o, rays_d, model.center, model.half_size, 1)
+        hits_t[(hits_t[:, 0, 0]>=0)&(hits_t[:, 0, 0]<NEAR_DISTANCE), 0, 0] = NEAR_DISTANCE
+        _results = render_func(model, rays_o, rays_d, hits_t, **kwargs)
+        results['depth'] = _results['depth']
+        results['surface'] = _results['surface']
+        
     for k, v in results.items():
         if kwargs.get('to_cpu', False):
             v = v.cpu()
@@ -57,6 +68,8 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
            of each marching (the variable @N_samples)
     """
     exp_step_factor = kwargs.get('exp_step_factor', 0.)
+    black_bg = kwargs.get('black_bg', False)
+    density_scale = kwargs.get('density_scale', 1.0)
     results = {}
 
     # output tensors to be filled in
@@ -65,7 +78,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
     opacity = torch.zeros(N_rays, device=device)
     depth = torch.zeros(N_rays, device=device)
     rgb = torch.zeros(N_rays, 3, device=device)
-
+    feature = torch.zeros(N_rays, model.feature_out_dim, device=device)
     use_feature = model.feature_out_dim is not None
 
     samples = total_samples = 0
@@ -94,42 +107,23 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
         if valid_mask.sum()==0: break
 
         sigmas = torch.zeros(len(xyzs), device=device)
+        features = torch.zeros(len(xyzs), model.feature_out_dim, device=device)
         rgbs = torch.zeros(len(xyzs), 3, device=device)
-        _sigmas, _rgbs = model(xyzs[valid_mask], dirs[valid_mask], skip_feature=True, **kwargs)
-
-        if kwargs.get("edit_dict", {}):
-            _scores = model.calculate_selection_score_from_xyz(xyzs[valid_mask])
-            """
-            _features = model.encode_feature(xyzs[valid_mask])
-            _features /= _features.norm(dim=-1, keepdim=True)
-            _scores = _features @ model.query_features  # (N_points, n_texts)
-            if _scores.shape[-1] == 1:
-                _scores = _scores[:, 0]  # (N_points,)
-                _scores = (_scores >= getattr(model, "score_threshold", 0.3)).float()
-            else:
-                _scores = torch.nn.functional.softmax(_scores, dim=-1)  # (N_points, n_texts)
-                if model.score_threshold is not None:
-                    _scores = _scores[:, model.positive_ids].sum(-1)  # (N_points, )
-                    _scores = (_scores >= model.score_threshold).float()
-                else:
-                    _scores[:, model.positive_ids[0]] = _scores[:, model.positive_ids].sum(-1)  # (N_points, )
-                    _scores = torch.isin(torch.argmax(_scores, dim=-1), torch.tensor(model.positive_ids).cuda()).float()
-            """
-            if "deletion" in kwargs["edit_dict"]:
-                # the paper edits alpha rather than sigma
-                # but, for simplicity, roughly approximate it on sigma
-                _sigmas = torch.where(_scores < 0.5, _sigmas, _sigmas.new_zeros(_sigmas.shape))
-            if "extraction" in kwargs["edit_dict"]:
-                _sigmas = torch.where(_scores > 0.5, _sigmas, _sigmas.new_zeros(_sigmas.shape))
-            if "color_func" in kwargs["edit_dict"]:
-                _rgbs = _rgbs * (1-_scores[:, None]) + kwargs["edit_dict"]["color_func"](_rgbs) * _scores[:, None]
+        _sigmas, _rgbs, _features = model(xyzs[valid_mask], dirs[valid_mask], **kwargs)
 
         sigmas[valid_mask], rgbs[valid_mask] = _sigmas.float(), _rgbs.float()
         sigmas = rearrange(sigmas, '(n1 n2) -> n1 n2', n2=N_samples)
         rgbs = rearrange(rgbs, '(n1 n2) c -> n1 n2 c', n2=N_samples)
 
+        features[valid_mask] = _features.float()
+        features = rearrange(features, '(n1 n2) c -> n1 n2 c', n2=N_samples)
         vren.composite_test_fw(
-            sigmas, rgbs, deltas, ts,
+            sigmas.clone(), features.clone(), deltas.clone(), ts.clone(),
+            hits_t[:, 0].clone(), alive_indices.clone(), kwargs.get('T_threshold', 1e-4),
+            N_eff_samples.clone(), opacity.clone(), depth.clone(), feature)
+            
+        vren.composite_test_fw(
+            sigmas * density_scale, rgbs, deltas, ts,
             hits_t[:, 0], alive_indices, kwargs.get('T_threshold', 1e-4),
             N_eff_samples, opacity, depth, rgb)
         alive_indices = alive_indices[alive_indices>=0] # remove converged rays
@@ -138,13 +132,21 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
     results['depth'] = depth
     results['rgb'] = rgb
     results['total_samples'] = total_samples # total samples for all rays
-
+    results['rays_o'] = rays_o
+    results['rays_d'] = rays_d
+    
+    feature_bg = torch.ones_like(feature) / math.sqrt(feature.shape[-1])
+    feature += feature_bg*rearrange(1-opacity, 'n -> n 1')
+    
+    results['feature'] = feature / torch.linalg.vector_norm(feature, dim=1, keepdim=True)
+    
+    
     if kwargs.get('render_feature', False):
         with torch.no_grad():
             surfaces = rays_o + rays_d * results['depth'].detach()[..., None]
-            results['feature'] = model.encode_feature(surfaces)
+            results['surface'] = surfaces
 
-    if exp_step_factor==0: # synthetic
+    if exp_step_factor==0 and not black_bg: # synthetic
         rgb_bg = torch.ones(3, device=device)
     else: # real
         rgb_bg = torch.zeros(3, device=device)
@@ -167,6 +169,7 @@ def __render_rays_train(model, rays_o, rays_d, hits_t, **kwargs):
     """
     exp_step_factor = kwargs.get('exp_step_factor', 0.)
     results = {}
+    black_bg = kwargs.get('black_bg', False)
 
     rays_a, xyzs, dirs, results['deltas'], results['ts'], results['rm_samples'] = \
         RayMarcher.apply(
@@ -175,27 +178,33 @@ def __render_rays_train(model, rays_o, rays_d, hits_t, **kwargs):
             exp_step_factor, model.grid_size, MAX_SAMPLES)
 
     for k, v in kwargs.items(): # supply additional inputs, repeated per ray
-        if isinstance(v, torch.Tensor):
+        if isinstance(v, torch.Tensor) and 'seg' not in k:
             kwargs[k] = torch.repeat_interleave(v[rays_a[:, 0]], rays_a[:, 2], 0)
-    sigmas, rgbs = model(xyzs, dirs, skip_feature=True, **kwargs)
+    
+    sigmas, rgbs, features = model(xyzs, dirs, **kwargs)
 
     (results['vr_samples'], # volume rendering effective samples
     results['opacity'], results['depth'], results['rgb'], results['ws']) = \
         VolumeRenderer.apply(sigmas.contiguous(), rgbs.contiguous(), results['deltas'], results['ts'],
                              rays_a, kwargs.get('T_threshold', 1e-4))
     results['rays_a'] = rays_a
+    results['rays_d'] = rays_d
 
-    # efficient rendering of feature:
-    # this uses only few points arround the (pseudo) surface and simply averages it.
-    depth_with_noise = results['depth'].detach()[..., None] + torch.tensor([-0.005, -0.002, 0.0, 0.002, 0.005]).float().cuda()[None, :]
-    surfaces = rays_o[..., None, :] + rays_d[..., None, :] * depth_with_noise[..., None]  # (n,noise,3 xyz)
-    results['feature'] = model.encode_feature(surfaces.reshape(-1, 3)).reshape(rays_o.shape[0], 5, -1).mean(1)
-    # single point:
-    # surfaces = rays_o + rays_d * results['depth'].detach()[..., None]
-    # results['feature'] = model.encode_feature(surfaces)
-
+    _, _, _, feature, _ = VolumeRenderer.apply(sigmas.contiguous().detach(), features.contiguous(), results['deltas'].detach(), results['ts'].detach(),
+                             rays_a.detach(), kwargs.get('T_threshold', 1e-4))
+    feature_bg = torch.ones_like(feature) / math.sqrt(feature.shape[-1])
+    feature = feature + feature_bg*rearrange(1-results['opacity'].detach(), 'n -> n 1')
+    results['norm'] = torch.linalg.vector_norm(feature, dim=1, keepdim=True)
+    results['feature'] = feature / (torch.linalg.vector_norm(feature, dim=1, keepdim=True) + 1e-6)
+    if torch.isnan(results['feature']).any():
+        import pdb
+        pdb.set_trace()
+            
     if exp_step_factor==0: # synthetic
-        rgb_bg = torch.ones(3, device=rays_o.device)
+        if black_bg:
+            rgb_bg = torch.zeros(3, device=rays_o.device)
+        else:
+            rgb_bg = torch.ones(3, device=rays_o.device)
     else: # real
         if kwargs.get('random_bg', False):
             rgb_bg = torch.rand(3, device=rays_o.device)
@@ -204,4 +213,16 @@ def __render_rays_train(model, rays_o, rays_d, hits_t, **kwargs):
     results['rgb'] = results['rgb'] + \
                      rgb_bg*rearrange(1-results['opacity'], 'n -> n 1')
 
+    if 'depth_smooth_samples_num' in kwargs:
+        results['rgb'] = results['rgb'][:-kwargs['depth_smooth_samples_num']]
+        results['opacity_sup'] = results['opacity'][-kwargs['depth_smooth_samples_num']:]
+        results['opacity'] = results['opacity'][:-kwargs['depth_smooth_samples_num']]
+        results['ws'] = results['ws'][:-kwargs['depth_smooth_samples_num']]
+        results['ts'] = results['ts'][:-kwargs['depth_smooth_samples_num']]
+        results['deltas'] = results['deltas'][:-kwargs['depth_smooth_samples_num']]
+        results['rays_a'] = results['rays_a'][:-kwargs['depth_smooth_samples_num']]
+        results['rays_d'] = results['rays_d'][:-kwargs['depth_smooth_samples_num']]
+        results['feature'] = results['feature'][:-kwargs['depth_smooth_samples_num']]
+        results['depth_sup'] = results['depth'][-kwargs['depth_smooth_samples_num']:]
+        
     return results
