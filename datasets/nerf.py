@@ -41,10 +41,11 @@ class NeRFDataset(BaseDataset):
         self.num_seg_samples = kwargs.get('num_seg_samples', 64) 
         self.neg_sample_ratio = kwargs.get('neg_sample_ratio', 1)
         self.render_train = kwargs.get('render_train', False)
+        self.render_train_subsample = kwargs.get('render_train_subsample', 2)
         self.rotate_test = kwargs.get('rotate_test', False)
         self.load_depth_smooth = kwargs.get('load_depth_smooth', False)
         self.hierarchical_sampling = kwargs.get('hierarchical_sampling', False)
-
+        self.num_training_frames = 0
             
         if split == 'trainval':
             with open(os.path.join(self.root_dir, "transforms_train.json"), 'r') as f:
@@ -60,7 +61,9 @@ class NeRFDataset(BaseDataset):
         
         if self.render_train and split == 'val':
             with open(os.path.join(self.root_dir, f"transforms_train.json"), 'r') as f:
-                    frames = json.load(f)["frames"][::2] + frames
+                training_frames = json.load(f)["frames"][::self.render_train_subsample]
+                self.num_training_frames = len(training_frames)
+                frames = training_frames + frames
 
         if kwargs.get('load_seg', False):
             # TODO: on-the-fly encoding

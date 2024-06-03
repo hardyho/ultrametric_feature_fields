@@ -1,7 +1,7 @@
 #include "utils.h"
 #include <thrust/scan.h>
 
-const int MAX_FEAT_SIZE=128
+const int MAX_FEAT_SIZE=128;
 
 template <typename scalar_t>
 __global__ void composite_train_fw_kernel(

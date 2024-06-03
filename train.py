@@ -147,6 +147,7 @@ class NeRFSystem(LightningModule):
                                     neg_sample_ratio=hparams.neg_sample_ratio,
                                     rotate_test=hparams.rotate_test,
                                     render_train=hparams.render_train,
+                                    render_train_subsample=hparams.render_train_subsample,
                                     **kwargs)
         self.test_dataset.batch_size = self.hparams.batch_size
 
@@ -234,8 +235,8 @@ class NeRFSystem(LightningModule):
                 distances = distances / temperature
                 labels = torch.zeros((N_mask * N_pairs), dtype=torch.long).cuda()
                 loss_d['loss_seg_ultrametric'] = F.cross_entropy(distances, labels) * self.hparams.ultrametric_weight
+                
             if self.hparams.euclidean_weight != 0:
-                # print(batch['seg_pix_idxs'].shape, batch['seg_negatives'].shape, batch['seg_positives'].shape)
                 positive_distance = (results['feature'][batch['seg_positives'][..., 0]] *
                                     results['feature'][batch['seg_positives'][..., 1]]).sum(-1) # 
                 negative_distance = (results['feature'][batch['seg_negatives'][..., 0]] *
@@ -248,7 +249,6 @@ class NeRFSystem(LightningModule):
                 distances = distances / temperature
                 labels = torch.zeros((N_mask * N_pairs), dtype=torch.long).cuda()
                 loss_d['loss_seg_euclidean'] = F.cross_entropy(distances, labels) * self.hparams.euclidean_weight
-                print(loss_d['loss_seg_euclidean'])
                 
             # if self.hparams.dataset_name == 'nerf' or self.hparams.dataset_name == 'partnet':
             #     loss_d['loss_seg_bg'] = ((results['feature'][(batch['rgb'] < 0.99).any(dim=-1)].sum(-1) / 
@@ -344,21 +344,20 @@ class NeRFSystem(LightningModule):
         if self.hparams.run_seg_inference:
             colors = np.random.randint(0, 256, (self.hparams.num_seg_test + 1, 3))
             colors[-1] = 255
-            
+        
         if (not self.hparams.no_save_test): # save test image to disk
-            idx = batch['img_idxs']     
-            
+            idx = batch['img_idxs'] 
             segmentations = []
             distances = [(i+1) * 0.01 for i in range(100)]
 
-            if self.current_epoch == self.hparams.num_epochs - 1 and self.hparams.run_seg_inference:
+            if self.current_epoch == self.hparams.num_epochs - 1 and self.hparams.run_seg_inference and idx > self.test_dataset.num_training_frames:
                 for distance in distances:
                     segmentation = get_segmentation(results['feature'], distance, self.hparams.num_seg_test, h, w)
                     segmentations.append(segmentation)
                     
                     segmentation_map = rearrange(segmentation, '(h w) -> h w', h=h)
                     segmentation_map = (colors[segmentation_map]).astype(np.uint8)
-                    seg_dir = os.path.join(self.val_dir, f'{idx:03d}_s')
+                    seg_dir = os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_s')
                     os.makedirs(seg_dir, exist_ok=True)
                     imageio.imsave(os.path.join(seg_dir, f'{distance:.3f}.png'), segmentation_map)
 
@@ -392,28 +391,42 @@ class NeRFSystem(LightningModule):
                 visfeat = rearrange(lowrank.cpu().numpy(), '(h w) c -> h w c', h=h)
                 visfeat = (visfeat*255).astype(np.uint8)
                 if self.current_epoch % 5 == 0 or self.current_epoch == self.hparams.num_epochs - 1:  
-                    imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_f.png'), visfeat)
+                    if idx < self.test_dataset.num_training_frames:
+                        imageio.imsave(os.path.join(self.val_dir, f'train_{idx:03d}_f.png'), visfeat)
+                    else:
+                        imageio.imsave(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_f.png'), visfeat)
 
             rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_pred = (rgb_pred*255).astype(np.uint8)
             
             if self.current_epoch % 1 == 0 or self.current_epoch == self.hparams.num_epochs - 1:  
                 depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
-                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}.png'), rgb_pred)
-                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+                if idx < self.test_dataset.num_training_frames:
+                    imageio.imsave(os.path.join(self.val_dir, f'train_{idx:03d}.png'), rgb_pred)
+                    imageio.imsave(os.path.join(self.val_dir, f'train_{idx:03d}_d.png'), depth)
+                else:
+                    imageio.imsave(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}.png'), rgb_pred)
+                    imageio.imsave(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_d.png'), depth)
                 
             if self.current_epoch == self.hparams.num_epochs - 1:
-                np.save(os.path.join(self.val_dir, f'{idx:03d}_d.npy'), results['depth'].cpu().numpy())
-                np.save(os.path.join(self.val_dir, f'{idx:03d}_p.npy'), batch['pose'].cpu().numpy())
-                np.save(os.path.join(self.val_dir, f'intrinsic.npy'), batch['intrinsic'].cpu().numpy())
+                if idx < self.test_dataset.num_training_frames:
+                    np.save(os.path.join(self.val_dir, f'train_{idx:03d}_d.npy'), results['depth'].cpu().numpy())
+                    np.save(os.path.join(self.val_dir, f'train_{idx:03d}_p.npy'), batch['pose'].cpu().numpy())
+                    torch.save(results['feature'].detach().cpu(), os.path.join(self.val_dir, f'train_{idx:03d}_f.pth'))
+                else:
+                    np.save(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_d.npy'), results['depth'].cpu().numpy())
+                    np.save(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_p.npy'), batch['pose'].cpu().numpy())
+                    torch.save(results['feature'].detach().cpu(), os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_f.pth'))
                 
-                torch.save(results['feature'].detach().cpu(), os.path.join(self.val_dir, f'{idx:03d}_f.pth'))
+                np.save(os.path.join(self.val_dir, f'intrinsic.npy'), batch['intrinsic'].cpu().numpy())
                 
                 if 'surface' in results:
                     surface = rearrange(results['surface'].cpu().numpy(), '(h w) c -> h w c', h=h)
-                    with open(os.path.join(self.val_dir, f'{idx:03d}_surface.npy'), 'wb') as f:
-                        np.save(f, surface)
-                        print('Surface saved.')
+                    if idx < self.test_dataset.num_training_frames:
+                        np.save(os.path.join(self.val_dir, f'train_{idx:03d}_surface.npy'), surface)
+                    else:
+                        np.save(os.path.join(self.val_dir, f'{idx - self.test_dataset.num_training_frames:03d}_surface.npy'), surface)
+                    print('Surface saved.')
 
         return logs
 

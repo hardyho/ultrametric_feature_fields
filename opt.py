@@ -96,6 +96,8 @@ def get_opts():
                         help='run 2D segentation inference')
     parser.add_argument('--render_train', action='store_true', default=False,
                         help='render images and features in the training set, needed for 3D segmentation')
+    parser.add_argument('--render_train_subsample', type=int, default=2,
+                        help='subsample ratio when rendering training set, set to higher ratio to save Disk Storage and time')
     parser.add_argument('--rotate_test', action='store_true', default=False,
                         help='render images with additional rotation for view consistency evaluation')
 

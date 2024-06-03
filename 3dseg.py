@@ -7,12 +7,14 @@ import imageio
 import os
 import argparse
 import tqdm
+import glob
 import open3d as o3d
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('name', type=str)           # positional argument
 parser.add_argument('exp', type=str)           # positional argument
+parser.add_argument('output', type=str)           # positional argument
+
 parser.add_argument('-t', '--threshold', type=float, default=5e-3)      # option that takes a value
 parser.add_argument('--k_query', type=int, default=5)  # on/off flag
 parser.add_argument('-o', '--n_outliers', type=int, default=2)  # on/off flag
@@ -76,14 +78,16 @@ query_depths = []
 
 last_epoch = max([int(f) for f in os.listdir(f'results/nerf/{args.exp}')])
 
-for i in tqdm.tqdm([i for i in range(0, 50)]):
-    depth = np.load(f'results/nerf/{args.exp}/{last_epoch}/{i:03d}_d.npy').reshape(-1)
-    coords.append(np.load(f'results/nerf/{args.exp}/{last_epoch}/{i:03d}_surface.npy').reshape(-1, 3)[depth > 0.3])
-    feats.append(torch.load(f'results/nerf/{args.exp}/{last_epoch}/{i:03d}_f.pth')[depth > 0.3])
+num_training_frames = len(glob.glob(f'results/nerf/{args.exp}/{last_epoch}/train_*_d.npy'))
+num_test_frames = len(glob.glob(f'results/nerf/{args.exp}/{last_epoch}/[0-9]*_d.npy'))
+
+for i in tqdm.tqdm([i for i in range(num_training_frames)]):
+    depth = np.load(f'results/nerf/{args.exp}/{last_epoch}/train_{i:03d}_d.npy').reshape(-1)
+    coords.append(np.load(f'results/nerf/{args.exp}/{last_epoch}/train_{i:03d}_surface.npy').reshape(-1, 3)[depth > 0.3])
+    feats.append(torch.load(f'results/nerf/{args.exp}/{last_epoch}/train_{i:03d}_f.pth')[depth > 0.3])
     
-last_epoch = os.lis
-for i in [i for i in range(50, 60)]:
-    print('load test')
+print('Loading test data')
+for i in [i for i in range(num_test_frames)]:
     query_coords.append(np.load(f'results/nerf/{args.exp}/{last_epoch}/{i:03d}_surface.npy').reshape(-1, 3))
     query_depths.append(torch.tensor(np.load(f'results/nerf/{args.exp}/{last_epoch}/{i:03d}_d.npy')).reshape(-1))
 
@@ -96,12 +100,12 @@ pcd.points = o3d.utility.Vector3dVector(coords)
 ind = np.array([i for i in range(len(coords))])
 
 downsample_ind = [i[0] for i in pcd.voxel_down_sample_and_trace(2e-3, coords.min(axis=0), coords.max(axis=0))[2]]
-print(f'Downsampling, {len(ind)}/{len(downsample_ind)} points left')
+print(f'Downsampling, {len(downsample_ind)}/{len(ind)} points left')
 pcd_new = o3d.geometry.PointCloud()
 pcd_new.points = o3d.utility.Vector3dVector(coords[downsample_ind])
 pcd_new, ind = pcd_new.remove_radius_outlier(nb_points=1, radius=4e-3)
 
-print(f'Cleaning, {len(downsample_ind)}/{len(ind)} points left')
+print(f'Cleaning, {len(ind)}/{len(downsample_ind)} points left')
 
 U, S, V = torch.pca_lowrank(feats[downsample_ind][ind].float(), niter=10)
 proj_V = V[:, :3].float()
@@ -110,7 +114,7 @@ lowrank = ((lowrank - lowrank.min(0, keepdim=True)[0]) /
            (lowrank.max(0, keepdim=True)[0] - lowrank.min(0, keepdim=True)[0])).clip(0, 1)
 
 os.makedirs('vis/', exist_ok=True)
-write_pointcloud(f'vis/{args.name}.ply', coords[downsample_ind][ind], (lowrank.numpy() *255).astype(np.uint8))
+write_pointcloud(f'vis/{args.output}.ply', coords[downsample_ind][ind], (lowrank.numpy() * 255).astype(np.uint8))
 
 feats = feats[downsample_ind][ind]
 coords = coords[downsample_ind][ind]
@@ -124,7 +128,7 @@ nsearch_w_distance = ml3d.layers.KNNSearch(return_distances=True)
 ans = nsearch(points, points, k_graph)
 k_index = ans.neighbors_index.reshape(-1, k_graph)[:, 1:].long()
 
-os.makedirs(f'vis/results/{args.name}/', exist_ok=True)
+os.makedirs(f'vis/{args.output}/', exist_ok=True)
 import tqdm
 
 for distance in tqdm.tqdm([(i + 1) * 0.01 for i in range(0, 50)]):
@@ -141,7 +145,7 @@ for distance in tqdm.tqdm([(i + 1) * 0.01 for i in range(0, 50)]):
         colors[i] = (lowrank[seg_result==i] * 255).mean(dim=0)
     
     for i, (query_coord, query_depth) in enumerate(zip(query_coords, query_depths)):
-        os.makedirs(f'vis/{args.name}/ultra/{i}', exist_ok=True)
+        os.makedirs(f'vis/{args.output}/{i}', exist_ok=True)
         nn_ans = nsearch_w_distance(points[(seg_result!=num_seg)], torch.tensor(query_coord), k_query)
         nn_index = nn_ans.neighbors_index.reshape(-1, k_query).long()
         nn_distance = nn_ans.neighbors_distance.reshape(-1,k_query).max(dim=1)[0]
@@ -151,5 +155,6 @@ for distance in tqdm.tqdm([(i + 1) * 0.01 for i in range(0, 50)]):
         segmentation_2d[nn_distance > args.threshold] = num_seg
         
         segmentation_2d = segmentation_2d.reshape(200, 200).numpy()
+        np.save(f'vis/{args.output}/{i}/{distance:.03f}.npy', segmentation_2d)
         segmentation_2d = colors[segmentation_2d].astype(np.uint8)
-        imageio.imsave(f'vis/{args.name}/ultra/{i}/{distance:.03f}.png', segmentation_2d)
+        imageio.imsave(f'vis/{args.output}/{i}/{distance:.03f}.png', segmentation_2d)

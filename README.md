@@ -1,6 +1,8 @@
 # View-Consistent Hierarchical 3D Segmentation Using Ultrametric Feature Fields
 
-This is the codebase of View-Consistent Hierarchical 3D Segmentation Using Ultrametric Feature Fields.
+[Paper](https://www.arxiv.org/pdf/2405.19678) | [Code](https://github.com/hardyho/ultrametric_feature_fields)
+
+This is the codebase of "View-Consistent Hierarchical 3D Segmentation Using Ultrametric Feature Fields".
 
 
 https://github.com/hardyho/ultrametric_feature_fields/assets/61956100/3ec7968b-db14-4527-b5c4-8fa1b2e0c8b0
@@ -71,4 +73,13 @@ Run the command to get the 3D segmentation results, which includes a 3D point cl
 
 The codebase of NeRF is derived from [ngp_pl](https://github.com/kwea123/ngp_pl/commit/6b2a66928d032967551ab98d5cd84c7ef1b83c3d) and [Distilled Feature Fields](https://github.com/pfnet-research/distilled-feature-fields)
 
-TODO: ADD BIBTEX
+If you find this project useful in your research, please cite:
+```
+@misc{he2024viewconsistent,
+      title={View-Consistent Hierarchical 3D SegmentationUsing Ultrametric Feature Fields}, 
+      author={Haodi He and Colton Stearns and Adam W. Harley and Leonidas J. Guibas},
+      year={2024},
+      eprint={2405.19678},
+      archivePrefix={arXiv},
+}
+```

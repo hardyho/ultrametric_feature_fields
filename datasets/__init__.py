@@ -1,4 +1,4 @@
 from .nerf import NeRFDataset
 
 
-dataset_dict = {'nerf': NeRFDataset,}
+dataset_dict = {'nerf': NeRFDataset,}   
