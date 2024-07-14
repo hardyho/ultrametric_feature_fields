@@ -6,6 +6,8 @@ def get_opts():
     # dataset parameters
     parser.add_argument('--root_dir', type=str, required=True,
                         help='root directory of dataset')
+    parser.add_argument('--render_dir', type=str,
+                        help='path to save rendered output, only used in render.py')
     parser.add_argument('--dataset_name', type=str, default='nsvf',
                         choices=['nerf', 'partnet'],
                         help='which dataset to train/test')

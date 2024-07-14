@@ -78,7 +78,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
     opacity = torch.zeros(N_rays, device=device)
     depth = torch.zeros(N_rays, device=device)
     rgb = torch.zeros(N_rays, 3, device=device)
-    feature = torch.zeros(N_rays, model.feature_out_dim, device=device)
+    feature = torch.zeros(N_rays, 256, device=device)
     use_feature = model.feature_out_dim is not None
 
     samples = total_samples = 0
@@ -107,7 +107,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
         if valid_mask.sum()==0: break
 
         sigmas = torch.zeros(len(xyzs), device=device)
-        features = torch.zeros(len(xyzs), model.feature_out_dim, device=device)
+        features = torch.zeros(len(xyzs), 256, device=device)
         rgbs = torch.zeros(len(xyzs), 3, device=device)
         _sigmas, _rgbs, _features = model(xyzs[valid_mask], dirs[valid_mask], **kwargs)
 

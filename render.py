@@ -25,65 +25,89 @@ os.environ["TORCH_HOME"] = "/tmp/torch/"
 
 if __name__ == "__main__":
     hparams = get_opts()
+    os.makedirs(hparams.render_dir, exist_ok=True)
 
-    rgb_act = 'None' if hparams.use_exposure else 'Sigmoid'
-    model = NGP(scale=hparams.scale, rgb_act=rgb_act, feature_out_dim=hparams.feature_dim).cuda()
-    load_ckpt(model, hparams.ckpt_path)
-
-    if hparams.edit_config is not None:
-        with open(hparams.edit_config, 'r') as f:
-            edit_config = yaml.safe_load(f)
-            print(edit_config)
-
-        # setup query
-        model.positive_ids = edit_config["query"]["positive_ids"]
-        model.score_threshold = edit_config["query"]["score_threshold"]
-        if edit_config["query"]["query_type"] == "text":
-            clip_editor = CLIPEditor()
-            model.query_features = clip_editor.encode_text([t.replace("_", " ") for t in edit_config["query"]["texts"]])
-            """
-            clip_model, _ = clip.load("ViT-B/32", device="cuda", download_root="/tmp/")
-            tokenized_texts = clip.tokenize(edit_config["query"]["texts"]).cuda()
-            with torch.no_grad():
-                text_features = clip_model.encode_text(tokenized_texts)
-                text_features /= text_features.norm(dim=-1, keepdim=True)
-            model.query_features = text_features
-            """
-        else:
-            raise NotImplementedError
-
-        # setup editing
-        edit_dict = {}
-        for op in edit_config["edit"]["operations"]:
-            if op["edit_type"] == "extraction":
-                edit_dict["extraction"] = True
-            elif op["edit_type"] == "deletion":
-                edit_dict["deletion"] = True
-            elif op["edit_type"] == "color_func":
-                edit_dict["color_func"] = eval(op["func_str"])
-            else:
-                raise NotImplementedError
-    else:
-        model.query_features = None
-        edit_dict = {}
-
+    rgb_act = 'Sigmoid'
+    model = NGP(scale=hparams.scale, rgb_act=rgb_act,
+                         feature_out_dim=hparams.feature_dim).cuda()
+    load_ckpt(model, hparams.ckpt_path, prefixes_to_ignore=["density_grid", "grid_coords"])
+    
+    
+    kwargs = {'root_dir': hparams.root_dir,
+                'downsample': hparams.downsample}
     # dataset
-    dataset = dataset_dict[hparams.dataset_name](
-        hparams.root_dir,
-        # split="test",
-        split="test_traj_fixed",
-        downsample=hparams.downsample,
-    )
+    dataset = dataset_dict[hparams.dataset_name](split='val', 
+            load_seg=hparams.load_seg,
+            num_seg_samples=hparams.num_seg_samples,
+            neg_sample_ratio=hparams.neg_sample_ratio,
+            rotate_test=hparams.rotate_test,
+            render_train=hparams.render_train,
+            render_train_subsample=hparams.render_train_subsample,
+            **kwargs)
 
     # start
     directions = dataset.directions.cuda()
+    
     for img_idx in tqdm(range(len(dataset))):
         poses = dataset[img_idx]["pose"].cuda()
         rays_o, rays_d = get_rays(directions, poses)
-        results = render(model, rays_o, rays_d, **{"test_time": True, "T_threshold": 1e-2, "exp_step_factor": 1 / 256.0,
-                                                   "edit_dict": edit_dict})
+        kwargs = {'test_time': True,
+            'random_bg': hparams.random_bg,
+            'black_bg': hparams.dataset_name == 'partnet',
+            'detach_geometry': True}
+        if hparams.scale > 0.5:
+            kwargs['exp_step_factor'] = 1/256
+        if hparams.dataset_name == 'nerf' or hparams.dataset_name == 'partnet':
+            kwargs['exp_step_factor'] = 0
+            
+        kwargs['render_feature'] = True
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            results = render(model, rays_o, rays_d, **kwargs)
 
         w, h = dataset.img_wh
         image = results["rgb"].reshape(h, w, 3)
         image = (image.cpu().numpy() * 255).astype(np.uint8)
-        imageio.imsave(os.path.join("./", f"rendered_{img_idx:03d}.png"), image)  # TODO: cv2
+        if img_idx < dataset.num_training_frames:
+            imageio.imsave(os.path.join(hparams.render_dir, f"train_{img_idx:03d}.png"), image)  # TODO: cv2
+        else:
+            imageio.imsave(os.path.join(hparams.render_dir, f"{img_idx - dataset.num_training_frames:03d}.png"), image)  # TODO: cv2
+        
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
+            U, S, V = torch.pca_lowrank(
+                            (results['feature']).float(),
+                            niter=5)
+            proj_V = V[:, :3].float()
+            lowrank = torch.matmul(results['feature'].float(), proj_V)
+            lowrank_sub = lowrank.min(0, keepdim=True)[0]
+            lowrank_div = lowrank.max(0, keepdim=True)[0] - lowrank.min(0, keepdim=True)[0]
+        
+            lowrank = ((lowrank - lowrank.min(0, keepdim=True)[0]) / (lowrank.max(0, keepdim=True)[0] - lowrank.min(0, keepdim=True)[0])).clip(0, 1)
+            visfeat = rearrange(lowrank.cpu().numpy(), '(h w) c -> h w c', h=h)
+            visfeat = (visfeat*255).astype(np.uint8)
+            if img_idx < dataset.num_training_frames:
+                imageio.imsave(os.path.join(hparams.render_dir, f"train_{img_idx:03d}_f.png"), visfeat)
+                torch.save(results['feature'], os.path.join(hparams.render_dir, f"train_{img_idx:03d}_f.pth"))
+            else:
+                imageio.imsave(os.path.join(hparams.render_dir, f"{img_idx - dataset.num_training_frames:03d}_f.png"), visfeat)
+                torch.save(results['feature'], os.path.join(hparams.render_dir, f"{img_idx - dataset.num_training_frames:03d}_f.pth"))
+            
+
+            if img_idx < dataset.num_training_frames:
+                np.save(os.path.join(hparams.render_dir, f'train_{img_idx:03d}_d.npy'), results['depth'].cpu().numpy())
+                np.save(os.path.join(hparams.render_dir, f'train_{img_idx:03d}_p.npy'), dataset[img_idx]['pose'].cpu().numpy())
+                torch.save(results['feature'].detach().cpu(), os.path.join(hparams.render_dir, f'train_{img_idx:03d}_f.pth'))
+            else:
+                np.save(os.path.join(hparams.render_dir, f'{img_idx - dataset.num_training_frames:03d}_d.npy'), results['depth'].cpu().numpy())
+                np.save(os.path.join(hparams.render_dir, f'{img_idx - dataset.num_training_frames:03d}_p.npy'), dataset[img_idx]['pose'].cpu().numpy())
+                torch.save(results['feature'].detach().cpu(), os.path.join(hparams.render_dir, f'{img_idx - dataset.num_training_frames:03d}_f.pth'))
+            
+            np.save(os.path.join(hparams.render_dir, f'intrinsic.npy'), dataset[img_idx]['intrinsic'].cpu().numpy())
+            
+            if 'surface' in results:
+                surface = rearrange(results['surface'].cpu().numpy(), '(h w) c -> h w c', h=h)
+                if img_idx < dataset.num_training_frames:
+                    np.save(os.path.join(hparams.render_dir, f'train_{img_idx:03d}_surface.npy'), surface)
+                else:
+                    np.save(os.path.join(hparams.render_dir, f'{img_idx - dataset.num_training_frames:03d}_surface.npy'), surface)
+                print('Surface saved.')

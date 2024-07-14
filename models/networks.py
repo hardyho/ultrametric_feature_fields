@@ -139,8 +139,6 @@ class NGP(nn.Module):
                         }
                     )
                 setattr(self, f'tonemapper_net_{i}', tonemapper_net)
-                
-        
         
         if self.feature_out_dim is not None:
             L = 17; F = 4; log2_T = 20; N_min = 16
@@ -190,6 +188,7 @@ class NGP(nn.Module):
                                             "n_dims_to_encode": 3,
                                             "interpolation": "Linear"
                                         }]})
+            self.seg_proj = torch.nn.Linear(self.feature_out_dim, 256)
             
     def density(self, x, return_feat=False):
         """
@@ -281,7 +280,8 @@ class NGP(nn.Module):
         if self.use_smooth_encoding:
             x = torch.cat([x, x], dim=-1)
         x = self.feat_encoder(x)
-        features = self.feature_mlp(x)
+        x = self.feature_mlp(x)
+        features = self.seg_proj(x)
         return features
 
     @torch.no_grad()

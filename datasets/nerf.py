@@ -51,10 +51,12 @@ class NeRFDataset(BaseDataset):
             with open(os.path.join(self.root_dir, "transforms_train.json"), 'r') as f:
                 frames = json.load(f)["frames"]
             with open(os.path.join(self.root_dir, "transforms_val.json"), 'r') as f:
-                frames+= json.load(f)["frames"]
+                frames += json.load(f)["frames"]
         elif self.rotate_test and split == 'val':
-            # TODO
-            pass
+            frames = (json.load(open(os.path.join(
+                self.root_dir, "transforms_val.json"), 'r'))['frames'] +
+                json.load(open(os.path.join(
+                    self.root_dir, "transforms_val_rotate_90.json"), 'r'))['frames'])
         else:
             with open(os.path.join(self.root_dir, f"transforms_{split}.json"), 'r') as f:
                 frames = json.load(f)["frames"]

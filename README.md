@@ -53,13 +53,21 @@ The scripts for generating similar SAM outputs on new custom datasets is coming 
 
 ### NeRF Training
 ```
-python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train
+python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train --rotate_test
 ```
 
 - `--root_dir` is the root directory of the dataset.
 - `--ultrametric_weight` and `--euclidean_weight` is the loss weight of the contrastive loss in the Ultrametric and the Euclidean space respectively
 - `--run_seg_inference` will generate per-frame 2D scene parsing result during the inference (which may be view-inconsistent). This is just for visualization and are not needed for generating 3D segmentation.
 - `--render_train` will render the feature maps of images in the training set which are used in 3D segmentation. 
+- `--rotate_test` will render rotated test views for view consistency evaluation
+
+### (Optional) NeRF Inference
+```
+python render.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train --rotate_test --ckpt_path CKPT_PATH --render_dir RENDER_DIR
+```
+
+Run `render.py` if you want to run inference with checkpoints again after training. We recommend you to set `RENDER_DIR` as `results/nerf/NAME` for 3D segmentation.
 
 ### 3D Segmentation
 ```
@@ -68,6 +76,13 @@ python 3dseg.py EXP_NAME OUTPUT_NAME
 
 Run the command to get the 3D segmentation results, which includes a 3D point clouds colored by segmentation id, and view-consistent 2D segmentation maps for all test views.
 
+### Evaluation
+```
+python scripts/eval_nc.py ROOT_DIR EXP_NAME
+python scripts/eval_vc.py ROOT_DIR EXP_NAME
+```
+
+Run evalution to get the Normal Covering Score and the View Consistency Score of the 3D segmentation result.
 
 ## Citation
 

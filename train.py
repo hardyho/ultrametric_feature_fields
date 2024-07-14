@@ -249,10 +249,6 @@ class NeRFSystem(LightningModule):
                 distances = distances / temperature
                 labels = torch.zeros((N_mask * N_pairs), dtype=torch.long).cuda()
                 loss_d['loss_seg_euclidean'] = F.cross_entropy(distances, labels) * self.hparams.euclidean_weight
-                
-            # if self.hparams.dataset_name == 'nerf' or self.hparams.dataset_name == 'partnet':
-            #     loss_d['loss_seg_bg'] = ((results['feature'][(batch['rgb'] < 0.99).any(dim=-1)].sum(-1) / 
-            #                                 math.sqrt(results['feature'].shape[-1]) - 0.6).clip(min=0))
         
             
         # Add the depth smoothing loss after 5 epochs 
