@@ -40,11 +40,15 @@ Download the Blender-HS dataset from the [link](https://drive.google.com/file/d/
   - train_seg_hierarchy
     ...
   - val_seg_hierarchy
+  - train_depth
+  - val_depth
+  - val_visible
   - gt_seg
     - train
     - val
   - transforms_train.json
   - transforms_val.json
+  - transforms_val_rotate_90.json
 ```
 
 The scripts for generating similar SAM outputs on new custom datasets is coming soon.
