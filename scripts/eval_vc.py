@@ -51,7 +51,7 @@ dataset_vc_scores_0 = []
 dataset_vc_scores_1 = []
 dataset_vc_scores_2 = []
 
-with open(f'{args.root_dir}/transforms_val_rotate_90.json', 'r') as f:
+with open(f'{args.root_dir}/transforms_val_rotate.json', 'r') as f:
     data = json.load(f)
     rotated_frames = data['frames']
     
@@ -80,8 +80,8 @@ for i, image_name in tqdm(enumerate(sorted(image_names, key=lambda x: int(x[2:])
     seg_maps_rotated_path = f'vis/{args.name}/{i + len(frames)}'
     seg_maps_rotated = np.array([np.load(os.path.join(seg_maps_rotated_path, s)) for s in sorted(os.listdir(seg_maps_rotated_path)) if s.endswith('npy')])
 
-    visible_src_mask = np.array(imageio.imread(f'{args.root_dir}/val_visible_90/{image_name}_rotate.png'))[-200:, -200:, 0].astype(bool)
-    visible_tgt_mask = np.array(imageio.imread(f'{args.root_dir}/val_visible_90/{image_name}.png'))[-200:, -200:, 0].astype(bool)
+    visible_src_mask = np.array(imageio.imread(f'{args.root_dir}/val_visible/{image_name}_rotate.png'))[-200:, -200:, 0].astype(bool)
+    visible_tgt_mask = np.array(imageio.imread(f'{args.root_dir}/val_visible/{image_name}.png'))[-200:, -200:, 0].astype(bool)
 
     label_num = np.max(seg_maps) + 1
 

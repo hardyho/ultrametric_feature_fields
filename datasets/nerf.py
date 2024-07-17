@@ -56,7 +56,7 @@ class NeRFDataset(BaseDataset):
             frames = (json.load(open(os.path.join(
                 self.root_dir, "transforms_val.json"), 'r'))['frames'] +
                 json.load(open(os.path.join(
-                    self.root_dir, "transforms_val_rotate_90.json"), 'r'))['frames'])
+                    self.root_dir, "transforms_val_rotate.json"), 'r'))['frames'])
         else:
             with open(os.path.join(self.root_dir, f"transforms_{split}.json"), 'r') as f:
                 frames = json.load(f)["frames"]
