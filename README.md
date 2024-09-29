@@ -51,7 +51,7 @@ Download the Blender-HS dataset from the [link](https://drive.google.com/file/d/
   - transforms_val_rotate_90.json
 ```
 
-The scripts for generating similar SAM outputs on new custom datasets is coming soon.
+For custom datasets, you can follow this [instruction](scripts/README.md) to generate SAM outputs and the get the hierarchy information (`{train,val}_seg` and `{train,val}_seg_hierarchy`). 
 
 ## Usage
 
