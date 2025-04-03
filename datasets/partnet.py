@@ -120,7 +120,7 @@ class PartNetDataset(BaseDataset):
                              + [x for i, x in enumerate(seg_paths) if i%8 == 0])
                 self.poses = ([x for i, x in enumerate(self.poses) if i%8!=0][::self.render_train_subsample]
                              + [x for i, x in enumerate(self.poses) if i%8 == 0])
-                self.num_training_frames = len([_ for i, x in enumerate(img_paths) if i%8!=0][::self.render_train_subsample])
+                self.num_training_frames = len([x for i, x in enumerate(img_paths) if i%8!=0][::self.render_train_subsample])
             else:
                 img_paths = [x for i, x in enumerate(img_paths) if i%8 == 0]
                 feature_paths = None
