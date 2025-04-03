@@ -429,27 +429,26 @@ class NeRFSystem(LightningModule):
         return logs
 
     def validation_epoch_end(self, outputs):
-        psnrs = torch.stack([x['psnr'] for x in outputs])
+        psnrs = torch.stack([x['psnr'].cpu() for x in outputs])
         mean_psnr = all_gather_ddp_if_available(psnrs).mean()
         self.log('test/psnr', mean_psnr, True)
 
-        ssims = torch.stack([x['ssim'] for x in outputs])
+        ssims = torch.stack([x['ssim'].cpu() for x in outputs])
         mean_ssim = all_gather_ddp_if_available(ssims).mean()
         self.log('test/ssim', mean_ssim)
-        
         if 'acc' in outputs[0]:
-            accs = torch.stack([x['acc'] for x in outputs])
+            accs = torch.stack([x['acc'].cpu() for x in outputs])
             mean_acc = all_gather_ddp_if_available(accs).mean()
             self.log('test/acc', mean_acc)
             print("Accuracy:", mean_acc)
 
         if 'beta' in outputs[0]:
-            betas = torch.stack([x['beta'] for x in outputs])
+            betas = torch.stack([x['beta'].cpu() for x in outputs])
             mean_beta = all_gather_ddp_if_available(betas).mean()
             self.log('test/beta', mean_beta)
             
         if self.hparams.eval_lpips:
-            lpipss = torch.stack([x['lpips'] for x in outputs])
+            lpipss = torch.stack([x['lpips'].cpu() for x in outputs])
             mean_lpips = all_gather_ddp_if_available(lpipss).mean()
             self.log('test/lpips_vgg', mean_lpips)
 

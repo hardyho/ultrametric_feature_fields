@@ -83,7 +83,7 @@ python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --re
 
 ### PartNet Training
 ```
-python train.py --root_dir ROOT_DIR --dataset_name partnet --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train
+python train.py --root_dir ROOT_DIR --dataset_name partnet --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train --render_train_subsample 1
 ```
 
 ### (Optional) NeRF Inference
