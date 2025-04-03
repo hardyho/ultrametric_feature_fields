@@ -113,6 +113,8 @@ class NeRFSystem(LightningModule):
             kwargs['exp_step_factor'] = 1/256
         if self.hparams.dataset_name == 'nerf' or self.hparams.dataset_name == 'partnet':
             kwargs['exp_step_factor'] = 0
+        if self.hparams.dataset_name == 'partnet':
+            kwargs['density_scale'] = 5.0
             
         if self.hparams.depth_smooth and split=='train':
             kwargs['depth_smooth_samples_num'] = batch['depth_smooth_samples_num']
@@ -346,7 +348,7 @@ class NeRFSystem(LightningModule):
             segmentations = []
             distances = [(i+1) * 0.01 for i in range(100)]
 
-            if self.current_epoch == self.hparams.num_epochs - 1 and self.hparams.run_seg_inference and idx > self.test_dataset.num_training_frames:
+            if self.current_epoch == self.hparams.num_epochs - 1 and self.hparams.run_seg_inference and idx >= self.test_dataset.num_training_frames:
                 for distance in distances:
                     segmentation = get_segmentation(results['feature'], distance, self.hparams.num_seg_test, h, w)
                     segmentations.append(segmentation)
@@ -434,7 +436,7 @@ class NeRFSystem(LightningModule):
         ssims = torch.stack([x['ssim'] for x in outputs])
         mean_ssim = all_gather_ddp_if_available(ssims).mean()
         self.log('test/ssim', mean_ssim)
-            
+        
         if 'acc' in outputs[0]:
             accs = torch.stack([x['acc'] for x in outputs])
             mean_acc = all_gather_ddp_if_available(accs).mean()

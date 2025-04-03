@@ -25,6 +25,7 @@ pip install models/csrc/
 
 ## Data
 
+### Blender-HS Dataset
 Download the Blender-HS dataset from the [link](https://drive.google.com/file/d/1b7PPaZ8QTGF_lsv8rqvSKm3-IWMbK-c9/view?usp=sharing). Organized the dataset in following structure:
 ```
 -
@@ -53,6 +54,20 @@ Download the Blender-HS dataset from the [link](https://drive.google.com/file/d/
 
 For custom datasets, you can follow this [instruction](scripts/README.md) to generate SAM outputs and the get the hierarchy information (`{train,val}_seg` and `{train,val}_seg_hierarchy`). 
 
+### PartNet Dataset
+Download the PartNet Dataset with rendered images in three catagories, chair, table, cabinet, following [this](https://github.com/mikacuy/joint_learning_retrieval_deformation#data-download-and-preprocessing-details)(3.Targets > Images). Generate SAM outputs (see above) and the get the hierarchy information for the dataset. The layout should be:
+```
+-
+  - seg
+  - seg_hierarchy
+  - view-00
+    - meta.txt
+    - part-XXX.png
+    - shape-rgb.png
+  - view-01
+  ...
+```
+
 ## Usage
 
 ### NeRF Training
@@ -65,6 +80,11 @@ python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --re
 - `--run_seg_inference` will generate per-frame 2D scene parsing result during the inference (which may be view-inconsistent). This is just for visualization and are not needed for generating 3D segmentation.
 - `--render_train` will render the feature maps of images in the training set which are used in 3D segmentation. 
 - `--rotate_test` will render rotated test views for view consistency evaluation
+
+### PartNet Training
+```
+python train.py --root_dir ROOT_DIR --dataset_name nerf --exp_name EXP_NAME --render_feature --downsample 0.25 --num_epochs 20 --batch_size 4096 --ray_sampling_strategy same_image --feature_dim 128 --load_seg --hierarchical_sampling --ultrametric_weight 1.0 --euclidean_weight 1.0 --num_seg_samples 64 --depth_smooth --lr 1e-2 --run_seg_inference --render_train
+```
 
 ### (Optional) NeRF Inference
 ```
